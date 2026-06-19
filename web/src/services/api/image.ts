@@ -228,15 +228,23 @@ function withSystemPrompt(config: AiConfig, prompt: string) {
     return systemPrompt ? `${systemPrompt}\n\n${prompt}` : prompt;
 }
 
+let _proxyTargetUrl = "";
 function aiApiUrl(config: AiConfig, path: string) {
-    return buildApiUrl(config.baseUrl, path);
+    const directUrl = buildApiUrl(config.baseUrl, path);
+    _proxyTargetUrl = directUrl;
+    return config.proxyEnabled ? "/api/ai-proxy" : directUrl;
 }
 
 function aiHeaders(config: AiConfig, contentType?: string) {
-    return {
-        Authorization: `Bearer ${config.apiKey}`,
-        ...(contentType ? { "Content-Type": contentType } : {}),
-    };
+    const headers: Record<string, string> = {};
+    if (config.proxyEnabled) {
+        headers["x-ai-proxy-target"] = _proxyTargetUrl;
+        headers["x-ai-proxy-auth"] = "Bearer " + config.apiKey;
+    } else {
+        headers["Authorization"] = "Bearer " + config.apiKey;
+    }
+    if (contentType) headers["Content-Type"] = contentType;
+    return headers;
 }
 
 function geminiBaseUrl(config: Pick<AiConfig, "baseUrl">) {
@@ -719,7 +727,7 @@ export async function requestToolResponse(config: AiConfig, messages: ResponseIn
     }
 }
 
-export async function fetchImageModels(config: Pick<AiConfig, "baseUrl" | "apiKey" | "apiFormat">) {
+export async function fetchImageModels(config: Pick<AiConfig, "baseUrl" | "apiKey" | "apiFormat"> & { proxyEnabled?: boolean }) {
     try {
         if (config.apiFormat === "gemini") {
             const response = await axios.get<GeminiPayload>(geminiApiUrl({ ...defaultGeminiConfig, ...config }), { headers: geminiHeaders({ ...defaultGeminiConfig, ...config }) });
@@ -729,8 +737,13 @@ export async function fetchImageModels(config: Pick<AiConfig, "baseUrl" | "apiKe
                 .filter((id): id is string => Boolean(id))
                 .sort((a, b) => a.localeCompare(b));
         }
-        const response = await axios.get<{ data?: Array<{ id?: string }>; error?: { message?: string } }>(buildApiUrl(config.baseUrl, "/models"), {
-            headers: {
+        const _proxyEnabled = config.proxyEnabled || false;
+        const _modelUrl = buildApiUrl(config.baseUrl, "/models");
+        const response = await axios.get<{ data?: Array<{ id?: string }>; error?: { message?: string } }>(_proxyEnabled ? "/api/ai-proxy" : _modelUrl, {
+            headers: _proxyEnabled ? {
+                "x-ai-proxy-target": _modelUrl,
+                "x-ai-proxy-auth": "Bearer " + config.apiKey,
+            } : {
                 Authorization: `Bearer ${config.apiKey}`,
             },
         });
@@ -743,8 +756,8 @@ export async function fetchImageModels(config: Pick<AiConfig, "baseUrl" | "apiKe
     }
 }
 
-export async function fetchChannelModels(channel: ModelChannel) {
-    return fetchImageModels({ baseUrl: channel.baseUrl, apiKey: channel.apiKey, apiFormat: channel.apiFormat });
+export async function fetchChannelModels(channel: ModelChannel, proxyEnabled?: boolean) {
+    return fetchImageModels({ baseUrl: channel.baseUrl, apiKey: channel.apiKey, apiFormat: channel.apiFormat, proxyEnabled });
 }
 
 const defaultGeminiConfig: Pick<AiConfig, "baseUrl" | "apiKey" | "apiFormat" | "model" | "systemPrompt"> = {

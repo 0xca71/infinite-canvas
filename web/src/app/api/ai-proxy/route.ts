@@ -65,20 +65,19 @@ async function proxyRequest(request: NextRequest, method: string) {
             redirect: "manual",
         });
 
-        const responseHeaders = new Headers();
-        const passThroughHeaders = [
-            "content-type", "content-length", "content-disposition",
-            "cache-control", "etag", "x-request-id",
-        ];
-        for (const key of passThroughHeaders) {
-            const value = response.headers.get(key);
-            if (value) responseHeaders.set(key, value);
-        }
+        // Read response as text to avoid issues with gzip/content-encoding forwarding
+        const responseText = await response.text();
+        console.log("[AI Proxy] Response body length:", responseText.length);
 
-        return new Response(response.body, {
+        // Build safe headers - DO NOT forward Content-Encoding (fetch auto-decompresses)
+        // or Content-Length (it changes after re-serialization).
+        const forwardedHeaders = new Headers();
+        forwardedHeaders.set("Content-Type", "application/json");
+
+        return new Response(responseText, {
             status: response.status,
             statusText: response.statusText,
-            headers: responseHeaders,
+            headers: forwardedHeaders,
         });
     } catch (error) {
         if (error instanceof Error && error.name === "AbortError") {

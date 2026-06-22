@@ -1,6 +1,7 @@
 import axios from "axios";
 
 import { buildApiUrl, resolveModelRequestConfig, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
+import { resolveAdapter } from "./image-adapters";
 import { nanoid } from "nanoid";
 import { dataUrlToFile } from "@/lib/image-utils";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
@@ -625,26 +626,24 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
             throw new Error(readAxiosError(error, "请求失败"));
         }
     }
-    const quality = normalizeQuality(config.quality);
-    const requestSize = resolveRequestSize(quality, config.size);
     try {
-        const response = await axios.post<ImageApiResponse>(
+        console.log("[requestGeneration] Resolving adapter for model:", requestConfig.model);
+        const adapter = resolveAdapter(requestConfig.model);
+        console.log("[requestGeneration] Using adapter:", adapter.id);
+        const body = adapter.buildBody(requestConfig, withSystemPrompt(requestConfig, prompt), n);
+        console.log("[requestGeneration] Request body:", JSON.stringify(body));
+        const response = await axios.post(
             aiApiUrl(requestConfig, "/images/generations"),
-            {
-                model: requestConfig.model,
-                prompt: withSystemPrompt(requestConfig, prompt),
-                n,
-                ...(quality ? { quality } : {}),
-                ...(requestSize ? { size: requestSize } : {}),
-                response_format: "b64_json",
-                output_format: IMAGE_OUTPUT_FORMAT,
-            },
+            body,
             {
                 headers: aiHeaders(requestConfig, "application/json"),
                 signal: options?.signal,
             },
         );
-        const images = parseImagePayload(response.data);
+        console.log("[requestGeneration] Response status:", response.status);
+        console.log("[requestGeneration] Response data type:", typeof response.data);
+        const images = adapter.parseResponse(response.data);
+        console.log("[requestGeneration] Parsed images count:", images.length);
         return images;
     } catch (error) {
         throw new Error(readAxiosError(error, "请求失败"));

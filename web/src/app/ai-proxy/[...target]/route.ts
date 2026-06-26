@@ -22,6 +22,11 @@ type RouteContext = {
     params: Promise<{ target?: string[] }>;
 };
 
+type ParsedProxyTarget = {
+    baseUrl: URL;
+    apiPathParts: string[];
+};
+
 export async function OPTIONS(request: NextRequest) {
     return new Response(null, { status: 204, headers: corsHeaders(request) });
 }
@@ -36,24 +41,21 @@ export async function POST(request: NextRequest, context: RouteContext) {
 
 async function proxyAiRequest(request: NextRequest, context: RouteContext) {
     const params = await context.params;
-    const [rawTargetBaseUrl, ...targetPathParts] = params.target || [];
-    if (!rawTargetBaseUrl) return textResponse(request, "Missing AI proxy target", 400);
+    const targetParts = params.target || [];
+    if (!targetParts.length) return textResponse(request, "Missing AI proxy target", 400);
 
     const method = request.method.toUpperCase();
     if (method !== "GET" && method !== "POST") return textResponse(request, "Unsupported AI proxy method", 405);
 
-    let targetBaseUrl: URL;
-    try {
-        targetBaseUrl = new URL(decodeURIComponent(rawTargetBaseUrl));
-    } catch {
-        return textResponse(request, "Invalid AI proxy target", 400);
-    }
+    const parsedTarget = parseProxyTarget(targetParts);
+    if (!parsedTarget) return textResponse(request, "Invalid AI proxy target", 400);
 
+    const targetBaseUrl = parsedTarget.baseUrl;
     if (targetBaseUrl.protocol !== "http:" && targetBaseUrl.protocol !== "https:") return textResponse(request, "Unsupported AI proxy protocol", 400);
     if (isBlockedHostname(targetBaseUrl.hostname)) return textResponse(request, "AI proxy target is not allowed", 403);
     if (!isAllowedHost(targetBaseUrl.hostname)) return textResponse(request, `AI proxy host is not allowed: ${targetBaseUrl.hostname}`, 403);
 
-    const targetApiPath = `/${targetPathParts.map(encodeURIComponent).join("/")}`;
+    const targetApiPath = `/${parsedTarget.apiPathParts.map(encodeURIComponent).join("/")}`;
     if (!isAllowedApiPath(targetApiPath)) return textResponse(request, "Only OpenAI/Gemini compatible API paths are allowed", 403);
 
     const incomingUrl = new URL(request.url);
@@ -86,6 +88,75 @@ async function proxyAiRequest(request: NextRequest, context: RouteContext) {
         return textResponse(request, error instanceof Error ? error.message : "AI proxy error", 502);
     } finally {
         clearTimeout(timer);
+    }
+}
+
+function parseProxyTarget(parts: string[]): ParsedProxyTarget | null {
+    const first = parts[0];
+    const decodedFirst = safeDecodeURIComponent(first);
+
+    const directUrl = parseUrl(decodedFirst);
+    if (directUrl) return { baseUrl: directUrl, apiPathParts: parts.slice(1) };
+
+    const base64Url = parseUrl(safeBase64UrlDecode(first));
+    if (base64Url) return { baseUrl: base64Url, apiPathParts: parts.slice(1) };
+
+    const splitProtocolUrl = parseSplitProtocolUrl(parts);
+    if (splitProtocolUrl) return splitProtocolUrl;
+
+    return null;
+}
+
+function parseSplitProtocolUrl(parts: string[]): ParsedProxyTarget | null {
+    const protocol = safeDecodeURIComponent(parts[0]);
+    if (protocol !== "http:" && protocol !== "https:") return null;
+    const host = parts[1] ? safeDecodeURIComponent(parts[1]) : "";
+    if (!host) return null;
+
+    const apiStartIndex = findApiStartIndex(parts, 2);
+    if (apiStartIndex < 0) return null;
+
+    const basePathParts = parts.slice(2, apiStartIndex).map(safeDecodeURIComponent).filter(Boolean);
+    const apiPathParts = parts.slice(apiStartIndex);
+    const baseUrl = parseUrl(`${protocol}//${host}${basePathParts.length ? `/${basePathParts.join("/")}` : ""}`);
+    if (!baseUrl) return null;
+
+    return { baseUrl, apiPathParts };
+}
+
+function findApiStartIndex(parts: string[], start: number) {
+    for (let index = start; index < parts.length; index += 1) {
+        const part = safeDecodeURIComponent(parts[index]).toLowerCase();
+        const pathFromHere = `/${parts.slice(index).map(safeDecodeURIComponent).join("/")}`.toLowerCase();
+        if (ALLOWED_API_PREFIXES.includes(`/${part}`) || ALLOWED_API_PREFIXES.some((prefix) => pathFromHere === prefix || pathFromHere.startsWith(`${prefix}/`))) return index;
+    }
+    return -1;
+}
+
+function parseUrl(value: string) {
+    if (!value) return null;
+    try {
+        return new URL(value);
+    } catch {
+        return null;
+    }
+}
+
+function safeDecodeURIComponent(value: string) {
+    try {
+        return decodeURIComponent(value);
+    } catch {
+        return "";
+    }
+}
+
+function safeBase64UrlDecode(value: string) {
+    try {
+        const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+        const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+        return Buffer.from(padded, "base64").toString("utf8");
+    } catch {
+        return "";
     }
 }
 

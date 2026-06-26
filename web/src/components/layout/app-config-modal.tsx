@@ -1,6 +1,6 @@
 "use client";
 
-import { App, Button, Form, Input, Modal, Progress, Segmented, Select, Tabs } from "antd";
+import { App, Button, Form, Input, Modal, Progress, Segmented, Select, Switch, Tabs } from "antd";
 import { CircleAlert, Cloud, Plus, RefreshCw, Trash2, Wifi } from "lucide-react";
 import { useState } from "react";
 
@@ -9,7 +9,19 @@ import { fetchChannelModels } from "@/services/api/image";
 import { syncAppDataToWebdav, type AppSyncDomainKey, type AppSyncProgressEvent } from "@/services/app-sync";
 import { testWebdavConnection, WEBDAV_MANIFEST_FILE_NAME } from "@/services/webdav-sync";
 import { audioFormatOptions, audioVoiceOptions, normalizeAudioSpeedValue } from "@/lib/audio-generation";
-import { createModelChannel, defaultBaseUrlForApiFormat, filterModelsByCapability, modelOptionLabel, modelOptionsFromChannels, normalizeModelOptionValue, useConfigStore, type AiConfig, type ApiCallFormat, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
+import {
+    createModelChannel,
+    defaultBaseUrlForApiFormat,
+    filterModelsByCapability,
+    modelOptionLabel,
+    modelOptionsFromChannels,
+    normalizeModelOptionValue,
+    useConfigStore,
+    type AiConfig,
+    type ApiCallFormat,
+    type ModelCapability,
+    type ModelChannel,
+} from "@/stores/use-config-store";
 
 type ModelGroup = {
     capability: ModelCapability;
@@ -98,8 +110,18 @@ export function AppConfigModal() {
     };
 
     const updateChannelApiFormat = (channel: ModelChannel, apiFormat: ApiCallFormat) => {
-        const baseUrl = !channel.baseUrl.trim() || channel.baseUrl.trim() === defaultBaseUrlForApiFormat(channel.apiFormat) ? defaultBaseUrlForApiFormat(apiFormat) : channel.baseUrl;
-        updateChannel(channel.id, { apiFormat, baseUrl });
+        const realBaseUrl = realBaseUrlFromChannel(channel);
+        const baseUrl = !realBaseUrl.trim() || realBaseUrl.trim() === defaultBaseUrlForApiFormat(channel.apiFormat) ? defaultBaseUrlForApiFormat(apiFormat) : realBaseUrl;
+        updateChannel(channel.id, { apiFormat, baseUrl: isBackendProxyBaseUrl(channel.baseUrl) ? toBackendProxyBaseUrl(baseUrl, apiFormat) : baseUrl });
+    };
+
+    const updateChannelBaseUrl = (channel: ModelChannel, baseUrl: string) => {
+        updateChannel(channel.id, { baseUrl: isBackendProxyBaseUrl(channel.baseUrl) ? toBackendProxyBaseUrl(baseUrl, channel.apiFormat) : baseUrl });
+    };
+
+    const updateChannelBackendProxy = (channel: ModelChannel, enabled: boolean) => {
+        const realBaseUrl = realBaseUrlFromChannel(channel);
+        updateChannel(channel.id, { baseUrl: enabled ? toBackendProxyBaseUrl(realBaseUrl, channel.apiFormat) : realBaseUrl });
     };
 
     const addChannel = () => {
@@ -265,7 +287,11 @@ export function AppConfigModal() {
                                                         {apiFormatLabel(channel.apiFormat)} · 已保存 {channel.models.length} 个模型
                                                     </div>
                                                 </div>
-                                                <div className="flex shrink-0 gap-2">
+                                                <div className="flex shrink-0 items-center gap-2">
+                                                    <span className="flex items-center gap-1.5 text-xs text-stone-500">
+                                                        后端代理
+                                                        <Switch size="small" checked={isBackendProxyBaseUrl(channel.baseUrl)} onChange={(checked) => updateChannelBackendProxy(channel, checked)} />
+                                                    </span>
                                                     <Button size="small" loading={loadingChannelId === channel.id} onClick={() => void refreshChannelModels(channel)}>
                                                         拉取模型
                                                     </Button>
@@ -280,7 +306,7 @@ export function AppConfigModal() {
                                                     <Select value={channel.apiFormat} options={apiFormatOptions} onChange={(value: ApiCallFormat) => updateChannelApiFormat(channel, value)} />
                                                 </Form.Item>
                                                 <Form.Item label="Base URL" className="mb-0">
-                                                    <Input value={channel.baseUrl} onChange={(event) => updateChannel(channel.id, { baseUrl: event.target.value })} />
+                                                    <Input value={realBaseUrlFromChannel(channel)} onChange={(event) => updateChannelBaseUrl(channel, event.target.value)} />
                                                 </Form.Item>
                                                 <Form.Item label="API Key" className="mb-0">
                                                     <Input.Password value={channel.apiKey} onChange={(event) => updateChannel(channel.id, { apiKey: event.target.value })} />
@@ -432,6 +458,48 @@ export function AppConfigModal() {
             />
         </Modal>
     );
+}
+
+const apiPathSuffixes = ["/api/plan/v3", "/api/v3", "/v1beta", "/v1"];
+
+function isBackendProxyBaseUrl(baseUrl: string) {
+    return baseUrl.trim().startsWith("/ai-proxy/");
+}
+
+function realBaseUrlFromChannel(channel: Pick<ModelChannel, "baseUrl" | "apiFormat">) {
+    const baseUrl = channel.baseUrl.trim();
+    if (!isBackendProxyBaseUrl(baseUrl)) return baseUrl;
+    const [encodedTarget = "", ...pathParts] = baseUrl.replace(/^\/ai-proxy\/?/, "").split("/");
+    const proxyApiPath = `/${pathParts.join("/")}`.replace(/\/+$/, "");
+    try {
+        const upstreamBaseUrl = decodeURIComponent(encodedTarget).replace(/\/+$/, "");
+        if (isDefaultApiPath(proxyApiPath, channel.apiFormat)) return upstreamBaseUrl;
+        return `${upstreamBaseUrl}${proxyApiPath}`;
+    } catch {
+        return baseUrl;
+    }
+}
+
+function toBackendProxyBaseUrl(baseUrl: string, apiFormat: ApiCallFormat) {
+    const normalizedBaseUrl = baseUrl.trim().replace(/\/+$/, "");
+    if (!normalizedBaseUrl) return "";
+    const { upstreamBaseUrl, apiPath } = splitUpstreamApiPath(normalizedBaseUrl, apiFormat);
+    return `/ai-proxy/${encodeURIComponent(upstreamBaseUrl)}/${apiPath.replace(/^\/+/, "")}`;
+}
+
+function splitUpstreamApiPath(baseUrl: string, apiFormat: ApiCallFormat) {
+    const lowerBaseUrl = baseUrl.toLowerCase();
+    const suffix = apiPathSuffixes.find((item) => lowerBaseUrl.endsWith(item));
+    if (!suffix) return { upstreamBaseUrl: baseUrl, apiPath: defaultApiPathForFormat(apiFormat) };
+    return { upstreamBaseUrl: baseUrl.slice(0, -suffix.length).replace(/\/+$/, ""), apiPath: suffix };
+}
+
+function defaultApiPathForFormat(apiFormat: ApiCallFormat) {
+    return apiFormat === "gemini" ? "/v1beta" : "/v1";
+}
+
+function isDefaultApiPath(apiPath: string, apiFormat: ApiCallFormat) {
+    return apiPath.toLowerCase() === defaultApiPathForFormat(apiFormat);
 }
 
 function withChannels(config: AiConfig, channels: ModelChannel[]): AiConfig {

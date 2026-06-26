@@ -228,13 +228,14 @@ function withSystemPrompt(config: AiConfig, prompt: string) {
     return systemPrompt ? `${systemPrompt}\n\n${prompt}` : prompt;
 }
 
-function aiApiUrl(config: AiConfig, path: string) {
-    return buildApiUrl(config.baseUrl, path);
+function aiApiUrl(config: Pick<AiConfig, "baseUrl" | "proxyEnabled">, path: string) {
+    const target = buildApiUrl(config.baseUrl, path);
+    return config.proxyEnabled ? `/api/ai-proxy?target=${encodeURIComponent(target)}` : target;
 }
 
-function aiHeaders(config: AiConfig, contentType?: string) {
+function aiHeaders(config: Pick<AiConfig, "apiKey" | "proxyEnabled">, contentType?: string) {
     return {
-        Authorization: `Bearer ${config.apiKey}`,
+        [config.proxyEnabled ? "x-ai-proxy-auth" : "Authorization"]: `Bearer ${config.apiKey}`,
         ...(contentType ? { "Content-Type": contentType } : {}),
     };
 }
@@ -249,15 +250,15 @@ function geminiModelName(model: string) {
     return model.trim().replace(/^models\//, "");
 }
 
-function geminiApiUrl(config: Pick<AiConfig, "baseUrl" | "model">, action?: "generateContent" | "streamGenerateContent") {
+function geminiApiUrl(config: Pick<AiConfig, "baseUrl" | "model" | "proxyEnabled">, action?: "generateContent" | "streamGenerateContent") {
     const baseUrl = geminiBaseUrl(config);
-    if (!action) return `${baseUrl}/models`;
-    return `${baseUrl}/models/${encodeURIComponent(geminiModelName(config.model))}:${action}`;
+    const target = action ? `${baseUrl}/models/${encodeURIComponent(geminiModelName(config.model))}:${action}` : `${baseUrl}/models`;
+    return config.proxyEnabled ? `/api/ai-proxy?target=${encodeURIComponent(target)}` : target;
 }
 
-function geminiHeaders(config: Pick<AiConfig, "apiKey">) {
+function geminiHeaders(config: Pick<AiConfig, "apiKey" | "proxyEnabled">) {
     return {
-        "x-goog-api-key": config.apiKey,
+        [config.proxyEnabled ? "x-ai-proxy-api-key" : "x-goog-api-key"]: config.apiKey,
         "Content-Type": "application/json",
     };
 }
@@ -719,7 +720,7 @@ export async function requestToolResponse(config: AiConfig, messages: ResponseIn
     }
 }
 
-export async function fetchImageModels(config: Pick<AiConfig, "baseUrl" | "apiKey" | "apiFormat">) {
+export async function fetchImageModels(config: Pick<AiConfig, "baseUrl" | "apiKey" | "apiFormat" | "proxyEnabled">) {
     try {
         if (config.apiFormat === "gemini") {
             const response = await axios.get<GeminiPayload>(geminiApiUrl({ ...defaultGeminiConfig, ...config }), { headers: geminiHeaders({ ...defaultGeminiConfig, ...config }) });
@@ -729,10 +730,8 @@ export async function fetchImageModels(config: Pick<AiConfig, "baseUrl" | "apiKe
                 .filter((id): id is string => Boolean(id))
                 .sort((a, b) => a.localeCompare(b));
         }
-        const response = await axios.get<{ data?: Array<{ id?: string }>; error?: { message?: string } }>(buildApiUrl(config.baseUrl, "/models"), {
-            headers: {
-                Authorization: `Bearer ${config.apiKey}`,
-            },
+        const response = await axios.get<{ data?: Array<{ id?: string }>; error?: { message?: string } }>(aiApiUrl(config, "/models"), {
+            headers: aiHeaders(config),
         });
         return (response.data.data || [])
             .map((model) => model.id)
@@ -743,14 +742,15 @@ export async function fetchImageModels(config: Pick<AiConfig, "baseUrl" | "apiKe
     }
 }
 
-export async function fetchChannelModels(channel: ModelChannel) {
-    return fetchImageModels({ baseUrl: channel.baseUrl, apiKey: channel.apiKey, apiFormat: channel.apiFormat });
+export async function fetchChannelModels(channel: ModelChannel, proxyEnabled = false) {
+    return fetchImageModels({ baseUrl: channel.baseUrl, apiKey: channel.apiKey, apiFormat: channel.apiFormat, proxyEnabled });
 }
 
-const defaultGeminiConfig: Pick<AiConfig, "baseUrl" | "apiKey" | "apiFormat" | "model" | "systemPrompt"> = {
+const defaultGeminiConfig: Pick<AiConfig, "baseUrl" | "apiKey" | "apiFormat" | "model" | "systemPrompt" | "proxyEnabled"> = {
     baseUrl: "https://generativelanguage.googleapis.com",
     apiKey: "",
     apiFormat: "gemini",
     model: "",
     systemPrompt: "",
+    proxyEnabled: false,
 };

@@ -7,12 +7,13 @@ import { buildApiUrl, resolveModelRequestConfig, type AiConfig } from "@/stores/
 type RequestOptions = { signal?: AbortSignal };
 
 function aiApiUrl(config: AiConfig, path: string) {
-    return buildApiUrl(config.baseUrl, path);
+    const target = buildApiUrl(config.baseUrl, path);
+    return config.proxyEnabled ? `/api/ai-proxy?target=${encodeURIComponent(target)}` : target;
 }
 
 function aiHeaders(config: AiConfig) {
     return {
-        Authorization: `Bearer ${config.apiKey}`,
+        [config.proxyEnabled ? "x-ai-proxy-auth" : "Authorization"]: `Bearer ${config.apiKey}`,
         "Content-Type": "application/json",
     };
 }

@@ -110,18 +110,8 @@ export function AppConfigModal() {
     };
 
     const updateChannelApiFormat = (channel: ModelChannel, apiFormat: ApiCallFormat) => {
-        const realBaseUrl = realBaseUrlFromChannel(channel);
-        const baseUrl = !realBaseUrl.trim() || realBaseUrl.trim() === defaultBaseUrlForApiFormat(channel.apiFormat) ? defaultBaseUrlForApiFormat(apiFormat) : realBaseUrl;
-        updateChannel(channel.id, { apiFormat, baseUrl: isBackendProxyBaseUrl(channel.baseUrl) ? toBackendProxyBaseUrl(baseUrl, apiFormat) : baseUrl });
-    };
-
-    const updateChannelBaseUrl = (channel: ModelChannel, baseUrl: string) => {
-        updateChannel(channel.id, { baseUrl: isBackendProxyBaseUrl(channel.baseUrl) ? toBackendProxyBaseUrl(baseUrl, channel.apiFormat) : baseUrl });
-    };
-
-    const updateChannelBackendProxy = (channel: ModelChannel, enabled: boolean) => {
-        const realBaseUrl = realBaseUrlFromChannel(channel);
-        updateChannel(channel.id, { baseUrl: enabled ? toBackendProxyBaseUrl(realBaseUrl, channel.apiFormat) : realBaseUrl });
+        const baseUrl = !channel.baseUrl.trim() || channel.baseUrl.trim() === defaultBaseUrlForApiFormat(channel.apiFormat) ? defaultBaseUrlForApiFormat(apiFormat) : channel.baseUrl;
+        updateChannel(channel.id, { apiFormat, baseUrl });
     };
 
     const addChannel = () => {
@@ -143,7 +133,7 @@ export function AppConfigModal() {
         }
         setLoadingChannelId(channel.id);
         try {
-            const models = await fetchChannelModels(channel);
+            const models = await fetchChannelModels(channel, config.proxyEnabled);
             updateChannels(config.channels.map((item) => (item.id === channel.id ? { ...item, models } : item)));
             message.success(`${channel.name} 模型列表已更新`);
         } catch (error) {
@@ -161,7 +151,7 @@ export function AppConfigModal() {
         }
         setLoadingChannelId("all");
         try {
-            const entries = await Promise.all(runnable.map(async (channel) => [channel.id, await fetchChannelModels(channel)] as const));
+            const entries = await Promise.all(runnable.map(async (channel) => [channel.id, await fetchChannelModels(channel, config.proxyEnabled)] as const));
             const modelMap = new Map(entries);
             updateChannels(config.channels.map((channel) => (modelMap.has(channel.id) ? { ...channel, models: modelMap.get(channel.id) || [] } : channel)));
             message.success("模型列表已更新");
@@ -288,10 +278,6 @@ export function AppConfigModal() {
                                                     </div>
                                                 </div>
                                                 <div className="flex shrink-0 items-center gap-2">
-                                                    <span className="flex items-center gap-1.5 text-xs text-stone-500">
-                                                        后端代理
-                                                        <Switch size="small" checked={isBackendProxyBaseUrl(channel.baseUrl)} onChange={(checked) => updateChannelBackendProxy(channel, checked)} />
-                                                    </span>
                                                     <Button size="small" loading={loadingChannelId === channel.id} onClick={() => void refreshChannelModels(channel)}>
                                                         拉取模型
                                                     </Button>
@@ -306,7 +292,7 @@ export function AppConfigModal() {
                                                     <Select value={channel.apiFormat} options={apiFormatOptions} onChange={(value: ApiCallFormat) => updateChannelApiFormat(channel, value)} />
                                                 </Form.Item>
                                                 <Form.Item label="Base URL" className="mb-0">
-                                                    <Input value={realBaseUrlFromChannel(channel)} onChange={(event) => updateChannelBaseUrl(channel, event.target.value)} />
+                                                    <Input value={channel.baseUrl} onChange={(event) => updateChannel(channel.id, { baseUrl: event.target.value })} />
                                                 </Form.Item>
                                                 <Form.Item label="API Key" className="mb-0">
                                                     <Input.Password value={channel.apiKey} onChange={(event) => updateChannel(channel.id, { apiKey: event.target.value })} />
@@ -317,6 +303,15 @@ export function AppConfigModal() {
                                             </div>
                                         </section>
                                     ))}
+                                </div>
+                                <div className="mt-3 rounded-lg border border-stone-200 p-3 dark:border-stone-800">
+                                    <div className="flex items-center justify-between gap-3">
+                                        <div>
+                                            <div className="text-sm font-semibold">AI API 代理模式</div>
+                                            <div className="mt-1 text-xs text-stone-500">通过服务端转发 AI 请求，解决跨域（CORS）问题。本地 API（如 Cherry Studio）需开启此选项。</div>
+                                        </div>
+                                        <Switch checked={config.proxyEnabled} onChange={(checked) => updateConfig("proxyEnabled", checked)} />
+                                    </div>
                                 </div>
                             </Form>
                         ),
@@ -458,48 +453,6 @@ export function AppConfigModal() {
             />
         </Modal>
     );
-}
-
-const apiPathSuffixes = ["/api/plan/v3", "/api/v3", "/v1beta", "/v1"];
-
-function isBackendProxyBaseUrl(baseUrl: string) {
-    return baseUrl.trim().startsWith("/ai-proxy/");
-}
-
-function realBaseUrlFromChannel(channel: Pick<ModelChannel, "baseUrl" | "apiFormat">) {
-    const baseUrl = channel.baseUrl.trim();
-    if (!isBackendProxyBaseUrl(baseUrl)) return baseUrl;
-    const [encodedTarget = "", ...pathParts] = baseUrl.replace(/^\/ai-proxy\/?/, "").split("/");
-    const proxyApiPath = `/${pathParts.join("/")}`.replace(/\/+$/, "");
-    try {
-        const upstreamBaseUrl = decodeURIComponent(encodedTarget).replace(/\/+$/, "");
-        if (isDefaultApiPath(proxyApiPath, channel.apiFormat)) return upstreamBaseUrl;
-        return `${upstreamBaseUrl}${proxyApiPath}`;
-    } catch {
-        return baseUrl;
-    }
-}
-
-function toBackendProxyBaseUrl(baseUrl: string, apiFormat: ApiCallFormat) {
-    const normalizedBaseUrl = baseUrl.trim().replace(/\/+$/, "");
-    if (!normalizedBaseUrl) return "";
-    const { upstreamBaseUrl, apiPath } = splitUpstreamApiPath(normalizedBaseUrl, apiFormat);
-    return `/ai-proxy/${encodeURIComponent(upstreamBaseUrl)}/${apiPath.replace(/^\/+/, "")}`;
-}
-
-function splitUpstreamApiPath(baseUrl: string, apiFormat: ApiCallFormat) {
-    const lowerBaseUrl = baseUrl.toLowerCase();
-    const suffix = apiPathSuffixes.find((item) => lowerBaseUrl.endsWith(item));
-    if (!suffix) return { upstreamBaseUrl: baseUrl, apiPath: defaultApiPathForFormat(apiFormat) };
-    return { upstreamBaseUrl: baseUrl.slice(0, -suffix.length).replace(/\/+$/, ""), apiPath: suffix };
-}
-
-function defaultApiPathForFormat(apiFormat: ApiCallFormat) {
-    return apiFormat === "gemini" ? "/v1beta" : "/v1";
-}
-
-function isDefaultApiPath(apiPath: string, apiFormat: ApiCallFormat) {
-    return apiPath.toLowerCase() === defaultApiPathForFormat(apiFormat);
 }
 
 function withChannels(config: AiConfig, channels: ModelChannel[]): AiConfig {

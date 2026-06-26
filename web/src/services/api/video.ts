@@ -24,12 +24,13 @@ export type VideoGenerationTask = { id: string; provider: "openai" | "seedance";
 export type VideoGenerationTaskState = { status: "pending" } | { status: "completed"; result: VideoGenerationResult } | { status: "failed"; error: string };
 
 function aiApiUrl(config: AiConfig, path: string) {
-    return buildApiUrl(config.baseUrl, path);
+    const target = buildApiUrl(config.baseUrl, path);
+    return config.proxyEnabled ? `/api/ai-proxy?target=${encodeURIComponent(target)}` : target;
 }
 
 function aiHeaders(config: AiConfig, contentType?: string) {
     return {
-        Authorization: `Bearer ${config.apiKey}`,
+        [config.proxyEnabled ? "x-ai-proxy-auth" : "Authorization"]: `Bearer ${config.apiKey}`,
         ...(contentType ? { "Content-Type": contentType } : {}),
     };
 }

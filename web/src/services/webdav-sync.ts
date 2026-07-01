@@ -124,7 +124,18 @@ function buildWebdavUrl(config: WebdavSyncConfig, path: string) {
 }
 
 function normalizePath(path: string) {
-    return path.trim().replace(/^\/+|\/+$/g, "");
+    const normalized = path
+        .trim()
+        .replace(/\\+/g, "/")
+        .replace(/^\/+|\/+$/g, "");
+    if (
+        normalized
+            .split("/")
+            .filter(Boolean)
+            .some((part) => part === "." || part === "..")
+    )
+        throw new Error("同步文件路径无效");
+    return normalized;
 }
 
 function assertWebdavConfig(config: WebdavSyncConfig) {

@@ -1,13 +1,15 @@
 "use client";
 
 import { App, Button, Form, Input, Modal, Progress, Segmented, Select, Switch, Tabs } from "antd";
-import { CircleAlert, Cloud, Plus, RefreshCw, Trash2, Wifi } from "lucide-react";
+import { CircleAlert, Cloud, FolderOpen, Plus, RefreshCw, Trash2, Wifi } from "lucide-react";
 import { useState } from "react";
 
 import { ModelPicker } from "@/components/model-picker";
 import { fetchChannelModels } from "@/services/api/image";
-import { syncAppDataToWebdav, type AppSyncDomainKey, type AppSyncProgressEvent } from "@/services/app-sync";
-import { testWebdavConnection, WEBDAV_MANIFEST_FILE_NAME } from "@/services/webdav-sync";
+import { syncAppData, type AppSyncDomainKey, type AppSyncProgressEvent } from "@/services/app-sync";
+import { getSavedLocalSyncDirectory, isLocalFolderSyncSupported, LocalFolderRemoteStorage, pickLocalSyncDirectory } from "@/services/local-folder-storage";
+import { MANIFEST_FILE_NAME } from "@/services/remote-storage";
+import { WebDAVRemoteStorage } from "@/services/webdav-remote-storage";
 import { audioFormatOptions, audioVoiceOptions, normalizeAudioSpeedValue } from "@/lib/audio-generation";
 import {
     createModelChannel,
@@ -51,8 +53,9 @@ const apiFormatOptions: Array<{ label: string; value: ApiCallFormat }> = [
     { label: "Gemini", value: "gemini" },
 ];
 
-const webdavDomainKeys: AppSyncDomainKey[] = ["canvas", "assets", "image-workbench", "video-workbench"];
+const webdavDomainKeys: AppSyncDomainKey[] = ["settings", "canvas", "assets", "image-workbench", "video-workbench"];
 const webdavDomainLabels: Record<AppSyncDomainKey, string> = {
+    settings: "配置",
     canvas: "画布",
     assets: "我的素材",
     "image-workbench": "生图工作台",
@@ -86,7 +89,9 @@ export function AppConfigModal() {
     const setConfigDialogOpen = useConfigStore((state) => state.setConfigDialogOpen);
     const clearPromptContinue = useConfigStore((state) => state.clearPromptContinue);
     const modelOptions = config.models.map((model) => ({ label: modelOptionLabel(config, model), value: model }));
+    const localFolderSupported = isLocalFolderSyncSupported();
     const webdavReady = Boolean(webdav.url.trim());
+    const syncReady = webdav.syncMode === "webdav" ? webdavReady : webdav.syncMode === "local-folder" ? Boolean(webdav.localFolderName) : false;
 
     const saveConfig = (nextConfig: AiConfig) => {
         (Object.keys(nextConfig) as Array<keyof AiConfig>).forEach((key) => updateConfig(key, nextConfig[key]));
@@ -168,17 +173,39 @@ export function AppConfigModal() {
         if (!next.includes(config[group.modelKey])) updateConfig(group.modelKey, next[0] || "");
     };
 
-    const testWebdav = async () => {
-        if (!webdavReady) {
+    const getRemoteStorage = async () => {
+        if (webdav.syncMode === "webdav") return new WebDAVRemoteStorage(webdav);
+        const handle = await getSavedLocalSyncDirectory();
+        if (!handle) throw new Error("请先选择同步文件夹");
+        return new LocalFolderRemoteStorage(handle);
+    };
+
+    const chooseLocalFolder = async () => {
+        try {
+            const handle = await pickLocalSyncDirectory();
+            updateWebdavConfig("localFolderName", handle.name);
+            updateWebdavConfig("syncMode", "local-folder");
+            message.success("同步文件夹已选择");
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "选择同步文件夹失败");
+        }
+    };
+
+    const testSyncConnection = async () => {
+        if (webdav.syncMode === "off") {
+            message.warning("同步已关闭");
+            return;
+        }
+        if (webdav.syncMode === "webdav" && !webdavReady) {
             message.error("请先填写 WebDAV 地址");
             return;
         }
         setTestingWebdav(true);
         try {
-            await testWebdavConnection(webdav);
-            message.success("WebDAV 连接可用");
+            await (await getRemoteStorage()).testConnection();
+            message.success("同步连接可用");
         } catch (error) {
-            message.error(error instanceof Error ? error.message : "WebDAV 连接测试失败");
+            message.error(error instanceof Error ? error.message : "同步连接测试失败");
         } finally {
             setTestingWebdav(false);
         }
@@ -200,7 +227,11 @@ export function AppConfigModal() {
     };
 
     const syncWebdav = async () => {
-        if (!webdavReady) {
+        if (webdav.syncMode === "off") {
+            message.warning("同步已关闭");
+            return;
+        }
+        if (webdav.syncMode === "webdav" && !webdavReady) {
             message.error("请先填写 WebDAV 地址");
             return;
         }
@@ -208,12 +239,12 @@ export function AppConfigModal() {
         setWebdavDomainProgress(createWebdavDomainProgress());
         setWebdavSyncStatus("准备同步");
         try {
-            const result = await syncAppDataToWebdav(webdav, updateWebdavProgress);
+            const result = await syncAppData(await getRemoteStorage(), updateWebdavProgress);
             updateWebdavConfig("lastSyncedAt", result.syncedAt);
-            message.success(`同步完成：${result.projects} 个画布，${result.assets} 个素材，${result.imageLogs + result.videoLogs} 条记录，本次上传 ${result.uploadedFiles} 个文件 ${formatBytes(result.uploadedBytes)}`);
+            message.success(`同步完成：配置、${result.projects} 个画布，${result.assets} 个素材，${result.imageLogs + result.videoLogs} 条记录，本次上传 ${result.uploadedFiles} 个文件 ${formatBytes(result.uploadedBytes)}`);
         } catch (error) {
-            setWebdavSyncStatus(error instanceof Error ? error.message : "WebDAV 同步失败");
-            message.error(error instanceof Error ? error.message : "WebDAV 同步失败");
+            setWebdavSyncStatus(error instanceof Error ? error.message : "同步失败");
+            message.error(error instanceof Error ? error.message : "同步失败");
         } finally {
             setSyncingWebdav(false);
         }
@@ -396,7 +427,7 @@ export function AppConfigModal() {
                     },
                     {
                         key: "webdav",
-                        label: "WebDAV",
+                        label: "同步",
                         children: (
                             <Form layout="vertical" requiredMark={false}>
                                 <section className="rounded-lg border border-stone-200 p-3 dark:border-stone-800">
@@ -404,42 +435,66 @@ export function AppConfigModal() {
                                         <div>
                                             <div className="flex items-center gap-2 text-sm font-semibold">
                                                 <Cloud className="size-4" />
-                                                WebDAV 同步
+                                                数据同步
                                             </div>
-                                            <div className="mt-1 text-xs text-stone-500">同步画布、我的素材、生成记录和本地媒体文件，不包含 AI API Key；服务不支持 CORS 时可走 Next.js 转发。</div>
+                                            <div className="mt-1 text-xs text-stone-500">同步配置、亮暗主题、画布、我的素材、生成记录和本地媒体文件；可选择关闭、WebDAV 或本地文件夹。</div>
                                         </div>
                                         <div className="text-xs text-stone-500">{webdav.lastSyncedAt ? `上次同步 ${formatWebdavTime(webdav.lastSyncedAt)}` : "尚未同步"}</div>
                                     </div>
-                                    <div className="grid gap-4 md:grid-cols-2">
-                                        <Form.Item label="连接方式" className="mb-4 md:col-span-2">
-                                            <Segmented
-                                                block
-                                                value={webdav.proxyMode}
-                                                onChange={(value) => updateWebdavConfig("proxyMode", value as typeof webdav.proxyMode)}
-                                                options={[
-                                                    { label: "前端直连", value: "direct" },
-                                                    { label: "Next.js 转发", value: "nextjs" },
-                                                ]}
-                                            />
-                                        </Form.Item>
-                                        <Form.Item label="WebDAV 地址" className="mb-4">
-                                            <Input value={webdav.url} placeholder="https://nas.example.com/webdav" onChange={(event) => updateWebdavConfig("url", event.target.value)} />
-                                        </Form.Item>
-                                        <Form.Item label="远程目录" extra={`会在该目录下分业务目录保存，每个目录包含 ${WEBDAV_MANIFEST_FILE_NAME} 和 files/`} className="mb-4">
-                                            <Input value={webdav.directory} placeholder="infinite-canvas" onChange={(event) => updateWebdavConfig("directory", event.target.value)} />
-                                        </Form.Item>
-                                        <Form.Item label="用户名" className="mb-0">
-                                            <Input value={webdav.username} autoComplete="username" onChange={(event) => updateWebdavConfig("username", event.target.value)} />
-                                        </Form.Item>
-                                        <Form.Item label="密码 / 应用密码" className="mb-0">
-                                            <Input.Password value={webdav.password} autoComplete="current-password" onChange={(event) => updateWebdavConfig("password", event.target.value)} />
-                                        </Form.Item>
-                                    </div>
+                                    <Form.Item label="同步方式" className="mb-4">
+                                        <Segmented
+                                            block
+                                            value={webdav.syncMode}
+                                            onChange={(value) => updateWebdavConfig("syncMode", value as typeof webdav.syncMode)}
+                                            options={[
+                                                { label: "关闭", value: "off" },
+                                                { label: "WebDAV", value: "webdav" },
+                                                { label: "本地文件夹", value: "local-folder", disabled: !localFolderSupported },
+                                            ]}
+                                        />
+                                        {!localFolderSupported ? <div className="mt-2 text-xs text-stone-500">当前浏览器不支持本地文件夹同步，请使用 Chrome / Edge 桌面版</div> : null}
+                                    </Form.Item>
+                                    {webdav.syncMode === "webdav" ? (
+                                        <div className="grid gap-4 md:grid-cols-2">
+                                            <Form.Item label="连接方式" className="mb-4 md:col-span-2">
+                                                <Segmented
+                                                    block
+                                                    value={webdav.proxyMode}
+                                                    onChange={(value) => updateWebdavConfig("proxyMode", value as typeof webdav.proxyMode)}
+                                                    options={[
+                                                        { label: "前端直连", value: "direct" },
+                                                        { label: "Next.js 转发", value: "nextjs" },
+                                                    ]}
+                                                />
+                                            </Form.Item>
+                                            <Form.Item label="WebDAV 地址" className="mb-4">
+                                                <Input value={webdav.url} placeholder="https://nas.example.com/webdav" onChange={(event) => updateWebdavConfig("url", event.target.value)} />
+                                            </Form.Item>
+                                            <Form.Item label="远程目录" extra={`会在该目录下分业务目录保存，每个目录包含 ${MANIFEST_FILE_NAME} 和 files/`} className="mb-4">
+                                                <Input value={webdav.directory} placeholder="infinite-canvas" onChange={(event) => updateWebdavConfig("directory", event.target.value)} />
+                                            </Form.Item>
+                                            <Form.Item label="用户名" className="mb-0">
+                                                <Input value={webdav.username} autoComplete="username" onChange={(event) => updateWebdavConfig("username", event.target.value)} />
+                                            </Form.Item>
+                                            <Form.Item label="密码 / 应用密码" className="mb-0">
+                                                <Input.Password value={webdav.password} autoComplete="current-password" onChange={(event) => updateWebdavConfig("password", event.target.value)} />
+                                            </Form.Item>
+                                        </div>
+                                    ) : null}
+                                    {webdav.syncMode === "local-folder" ? (
+                                        <div className="rounded-lg border border-stone-200 p-3 text-sm dark:border-stone-800">
+                                            <div className="mb-3 text-xs text-stone-500">请选择本地文件夹或已挂载的 NAS 共享目录。浏览器可能会在权限过期后要求重新授权。</div>
+                                            <Button icon={<FolderOpen className="size-4" />} disabled={!localFolderSupported} onClick={() => void chooseLocalFolder()}>
+                                                选择同步文件夹
+                                            </Button>
+                                            <span className="ml-3 text-xs text-stone-500">{webdav.localFolderName ? `当前：${webdav.localFolderName}` : "尚未选择"}</span>
+                                        </div>
+                                    ) : null}
                                     <div className="mt-4 flex flex-wrap items-center gap-2">
-                                        <Button icon={<Wifi className="size-4" />} disabled={!webdavReady || syncingWebdav} loading={testingWebdav} onClick={() => void testWebdav()}>
+                                        <Button icon={<Wifi className="size-4" />} disabled={!syncReady || syncingWebdav} loading={testingWebdav} onClick={() => void testSyncConnection()}>
                                             测试连接
                                         </Button>
-                                        <Button type="primary" icon={<RefreshCw className="size-4" />} disabled={!webdavReady || testingWebdav} loading={syncingWebdav} onClick={() => void syncWebdav()}>
+                                        <Button type="primary" icon={<RefreshCw className="size-4" />} disabled={!syncReady || testingWebdav} loading={syncingWebdav} onClick={() => void syncWebdav()}>
                                             {syncingWebdav ? "同步中" : "立即同步"}
                                         </Button>
                                         {webdavSyncStatus ? <span className="text-xs text-stone-500">{webdavSyncStatus}</span> : null}

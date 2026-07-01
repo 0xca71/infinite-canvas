@@ -53,8 +53,9 @@ const apiFormatOptions: Array<{ label: string; value: ApiCallFormat }> = [
     { label: "Gemini", value: "gemini" },
 ];
 
-const webdavDomainKeys: AppSyncDomainKey[] = ["canvas", "assets", "image-workbench", "video-workbench"];
+const webdavDomainKeys: AppSyncDomainKey[] = ["settings", "canvas", "assets", "image-workbench", "video-workbench"];
 const webdavDomainLabels: Record<AppSyncDomainKey, string> = {
+    settings: "配置",
     canvas: "画布",
     assets: "我的素材",
     "image-workbench": "生图工作台",
@@ -240,7 +241,7 @@ export function AppConfigModal() {
         try {
             const result = await syncAppData(await getRemoteStorage(), updateWebdavProgress);
             updateWebdavConfig("lastSyncedAt", result.syncedAt);
-            message.success(`同步完成：${result.projects} 个画布，${result.assets} 个素材，${result.imageLogs + result.videoLogs} 条记录，本次上传 ${result.uploadedFiles} 个文件 ${formatBytes(result.uploadedBytes)}`);
+            message.success(`同步完成：配置、${result.projects} 个画布，${result.assets} 个素材，${result.imageLogs + result.videoLogs} 条记录，本次上传 ${result.uploadedFiles} 个文件 ${formatBytes(result.uploadedBytes)}`);
         } catch (error) {
             setWebdavSyncStatus(error instanceof Error ? error.message : "同步失败");
             message.error(error instanceof Error ? error.message : "同步失败");
@@ -436,7 +437,7 @@ export function AppConfigModal() {
                                                 <Cloud className="size-4" />
                                                 数据同步
                                             </div>
-                                            <div className="mt-1 text-xs text-stone-500">同步画布、我的素材、生成记录和本地媒体文件，不包含 AI API Key；可选择关闭、WebDAV 或本地文件夹。</div>
+                                            <div className="mt-1 text-xs text-stone-500">同步配置、亮暗主题、画布、我的素材、生成记录和本地媒体文件；可选择关闭、WebDAV 或本地文件夹。</div>
                                         </div>
                                         <div className="text-xs text-stone-500">{webdav.lastSyncedAt ? `上次同步 ${formatWebdavTime(webdav.lastSyncedAt)}` : "尚未同步"}</div>
                                     </div>

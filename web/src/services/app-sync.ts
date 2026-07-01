@@ -7,15 +7,20 @@ import { getImageBlob, resolveImageUrl, setImageBlob } from "@/services/image-st
 import { MANIFEST_FILE_NAME, type RemoteStorage } from "@/services/remote-storage";
 import type { Asset } from "@/stores/use-asset-store";
 import { useAssetStore } from "@/stores/use-asset-store";
+import type { AiConfig } from "@/stores/use-config-store";
+import { useConfigStore } from "@/stores/use-config-store";
+import type { ThemeName } from "@/stores/use-theme-store";
+import { useThemeStore } from "@/stores/use-theme-store";
 import type { CanvasProject } from "@/app/(user)/canvas/stores/use-canvas-store";
 import { useCanvasStore } from "@/app/(user)/canvas/stores/use-canvas-store";
 
 type StoredLog = Record<string, unknown> & { id?: string };
-export type AppSyncDomainKey = "canvas" | "assets" | "image-workbench" | "video-workbench";
+export type AppSyncDomainKey = "settings" | "canvas" | "assets" | "image-workbench" | "video-workbench";
 type DomainKey = AppSyncDomainKey;
 type CanvasDomainData = { projects: CanvasProject[] };
 type AssetDomainData = { assets: Asset[] };
 type LogDomainData = { logs: StoredLog[] };
+type SettingsDomainData = { config: AiConfig; theme: ThemeName };
 
 type AppSyncFile = {
     storageKey: string;
@@ -40,6 +45,7 @@ type SyncDomainOptions<T> = {
     emptyData: T;
     mergeData: (local: T, remote: T) => T;
     applyData?: (data: T) => Promise<void>;
+    syncFiles?: boolean;
 };
 
 type SyncDomainResult<T> = {
@@ -58,6 +64,7 @@ export type AppSyncResult = {
     assets: number;
     imageLogs: number;
     videoLogs: number;
+    settings: number;
     files: number;
     manifestBytes: number;
     uploadedFiles: number;
@@ -85,7 +92,16 @@ export async function syncAppData(storage: RemoteStorage, onProgress?: AppSyncPr
     emitProgress(onProgress, { stage: "等待本地数据加载" });
     await Promise.all([waitForHydration(useCanvasStore), waitForHydration(useAssetStore)]);
 
-    const [canvas, assets, imageLogs, videoLogs] = await Promise.all([
+    const [settings, canvas, assets, imageLogs, videoLogs] = await Promise.all([
+        syncDomain<SettingsDomainData>(storage, onProgress, {
+            key: "settings",
+            label: "配置",
+            emptyData: { config: useConfigStore.getState().config, theme: useThemeStore.getState().theme },
+            localData: async () => ({ config: useConfigStore.getState().config, theme: useThemeStore.getState().theme }),
+            mergeData: (_local, remote) => remote,
+            applyData: async (data) => applySettings(data),
+            syncFiles: false,
+        }),
         syncDomain<CanvasDomainData>(storage, onProgress, {
             key: "canvas",
             label: "画布",
@@ -122,15 +138,16 @@ export async function syncAppData(storage: RemoteStorage, onProgress?: AppSyncPr
 
     const result = {
         syncedAt: new Date().toISOString(),
-        mergedRemote: [canvas, assets, imageLogs, videoLogs].some((item) => item.mergedRemote),
+        mergedRemote: [settings, canvas, assets, imageLogs, videoLogs].some((item) => item.mergedRemote),
         projects: canvas.data.projects.length,
         assets: assets.data.assets.length,
         imageLogs: imageLogs.data.logs.length,
         videoLogs: videoLogs.data.logs.length,
-        files: canvas.files + assets.files + imageLogs.files + videoLogs.files,
-        manifestBytes: canvas.manifestBytes + assets.manifestBytes + imageLogs.manifestBytes + videoLogs.manifestBytes,
-        uploadedFiles: canvas.uploadedFiles + assets.uploadedFiles + imageLogs.uploadedFiles + videoLogs.uploadedFiles,
-        uploadedBytes: canvas.uploadedBytes + assets.uploadedBytes + imageLogs.uploadedBytes + videoLogs.uploadedBytes,
+        settings: 1,
+        files: settings.files + canvas.files + assets.files + imageLogs.files + videoLogs.files,
+        manifestBytes: settings.manifestBytes + canvas.manifestBytes + assets.manifestBytes + imageLogs.manifestBytes + videoLogs.manifestBytes,
+        uploadedFiles: settings.uploadedFiles + canvas.uploadedFiles + assets.uploadedFiles + imageLogs.uploadedFiles + videoLogs.uploadedFiles,
+        uploadedBytes: settings.uploadedBytes + canvas.uploadedBytes + assets.uploadedBytes + imageLogs.uploadedBytes + videoLogs.uploadedBytes,
     };
     emitProgress(onProgress, { stage: "同步完成", status: "success" });
     return result;
@@ -146,13 +163,13 @@ async function syncDomain<T>(storage: RemoteStorage, onProgress: AppSyncProgress
 
         if (remoteManifest) {
             emitProgress(onProgress, { domain: options.key, label: options.label, stage: "下载缺失媒体", status: "active" });
-            await downloadMissingFiles(storage, options.key, mergedData, remoteManifest.files, onProgress);
+            if (options.syncFiles !== false) await downloadMissingFiles(storage, options.key, mergedData, remoteManifest.files, onProgress);
             emitProgress(onProgress, { domain: options.key, label: options.label, stage: "写入本地合并结果", status: "active" });
             await options.applyData?.(mergedData);
         }
 
         emitProgress(onProgress, { domain: options.key, label: options.label, stage: "上传新增媒体", status: "active" });
-        const uploaded = await uploadChangedFiles(storage, options.key, mergedData, remoteManifest?.files || [], onProgress);
+        const uploaded = options.syncFiles === false ? { files: [], uploadedFiles: 0, uploadedBytes: 0 } : await uploadChangedFiles(storage, options.key, mergedData, remoteManifest?.files || [], onProgress);
         const manifest: DomainManifest<T> = { app: "infinite-canvas", version: 1, domain: options.key, exportedAt: new Date().toISOString(), data: mergedData, files: uploaded.files };
         const manifestFile = new Blob([JSON.stringify(manifest, null, 2)], { type: "application/json" });
         emitProgress(onProgress, { domain: options.key, label: options.label, stage: `上传清单 ${formatBytes(manifestFile.size)}`, status: "active" });
@@ -264,6 +281,12 @@ async function uploadChangedFiles<T>(storage: RemoteStorage, domain: DomainKey, 
     return { files, uploadedFiles, uploadedBytes };
 }
 
+async function applySettings(data: SettingsDomainData) {
+    const { updateConfig } = useConfigStore.getState();
+    (Object.keys(data.config) as Array<keyof AiConfig>).forEach((key) => updateConfig(key, data.config[key]));
+    useThemeStore.getState().setTheme(data.theme);
+}
+
 async function hydrateAsset(asset: Asset): Promise<Asset> {
     if (asset.kind === "image" && asset.data.storageKey) {
         const dataUrl = await resolveImageUrl(asset.data.storageKey, asset.data.dataUrl);
@@ -323,6 +346,7 @@ function domainPath(domain: DomainKey, path: string) {
 }
 
 function domainLabel(domain: DomainKey) {
+    if (domain === "settings") return "配置";
     if (domain === "canvas") return "画布";
     if (domain === "assets") return "我的素材";
     if (domain === "image-workbench") return "生图工作台";

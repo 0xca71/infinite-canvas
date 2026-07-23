@@ -49,7 +49,11 @@ export type AiConfig = {
     canvasImageCount: string;
 };
 
+export type SyncMode = "off" | "webdav" | "local-folder";
+
 export type WebdavSyncConfig = {
+    syncMode: SyncMode;
+    localFolderName: string;
     url: string;
     username: string;
     password: string;
@@ -106,6 +110,8 @@ export const defaultConfig: AiConfig = {
 };
 
 export const defaultWebdavSyncConfig: WebdavSyncConfig = {
+    syncMode: "off",
+    localFolderName: "",
     url: "",
     username: "",
     password: "",

@@ -5,15 +5,28 @@ export type ThemeName = "light" | "dark";
 
 type ThemeStore = {
     theme: ThemeName;
-    setTheme: (theme: ThemeName) => void;
+    themeUpdatedAt: string;
+    setTheme: (theme: ThemeName, updatedAt?: string) => void;
 };
 
 export const useThemeStore = create<ThemeStore>()(
     persist(
         (set) => ({
             theme: "dark",
-            setTheme: (theme) => set({ theme }),
+            themeUpdatedAt: "",
+            setTheme: (theme, updatedAt = new Date().toISOString()) => set({ theme, themeUpdatedAt: updatedAt }),
         }),
-        { name: "infinite-canvas:theme_store" },
+        {
+            name: "infinite-canvas:theme_store",
+            partialize: (state) => ({ theme: state.theme, themeUpdatedAt: state.themeUpdatedAt }),
+            merge: (persisted, current) => {
+                const persistedState = (persisted || {}) as Partial<ThemeStore>;
+                return {
+                    ...current,
+                    theme: persistedState.theme === "light" ? "light" : "dark",
+                    themeUpdatedAt: typeof persistedState.themeUpdatedAt === "string" ? persistedState.themeUpdatedAt : "",
+                };
+            },
+        },
     ),
 );

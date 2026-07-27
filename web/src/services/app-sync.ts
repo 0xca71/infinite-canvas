@@ -6,7 +6,7 @@ import { MANIFEST_FILE_NAME, type RemoteStorage } from "@/services/remote-storag
 import type { Asset } from "@/stores/use-asset-store";
 import { useAssetStore } from "@/stores/use-asset-store";
 import type { AiConfig } from "@/stores/use-config-store";
-import { useConfigStore } from "@/stores/use-config-store";
+import { defaultConfig, normalizeAiConfig, useConfigStore } from "@/stores/use-config-store";
 import type { ThemeName } from "@/stores/use-theme-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { CanvasProject } from "@/stores/canvas/use-canvas-store";
@@ -18,7 +18,12 @@ type DomainKey = AppSyncDomainKey;
 type CanvasDomainData = { projects: CanvasProject[] };
 type AssetDomainData = { assets: Asset[] };
 type LogDomainData = { logs: StoredLog[] };
-type SettingsDomainData = { config: AiConfig; theme: ThemeName };
+type SettingsDomainData = {
+    config: AiConfig;
+    configUpdatedAt: string;
+    theme: ThemeName;
+    themeUpdatedAt: string;
+};
 
 type AppSyncFile = {
     storageKey: string;
@@ -94,9 +99,9 @@ export async function syncAppData(storage: RemoteStorage, onProgress?: AppSyncPr
         syncDomain<SettingsDomainData>(storage, onProgress, {
             key: "settings",
             label: "配置",
-            emptyData: { config: useConfigStore.getState().config, theme: useThemeStore.getState().theme },
-            localData: async () => ({ config: useConfigStore.getState().config, theme: useThemeStore.getState().theme }),
-            mergeData: (_local, remote) => remote,
+            emptyData: currentSettings(),
+            localData: async () => currentSettings(),
+            mergeData: mergeSettings,
             applyData: async (data) => applySettings(data),
             syncFiles: false,
         }),
@@ -280,9 +285,8 @@ async function uploadChangedFiles<T>(storage: RemoteStorage, domain: DomainKey, 
 }
 
 async function applySettings(data: SettingsDomainData) {
-    const { updateConfig } = useConfigStore.getState();
-    (Object.keys(data.config) as Array<keyof AiConfig>).forEach((key) => updateConfig(key, data.config[key]));
-    useThemeStore.getState().setTheme(data.theme);
+    useConfigStore.getState().replaceConfig(data.config, data.configUpdatedAt);
+    useThemeStore.getState().setTheme(data.theme, data.themeUpdatedAt);
 }
 
 async function hydrateAsset(asset: Asset): Promise<Asset> {
@@ -326,6 +330,38 @@ function mergeById<T extends { id?: string }>(local: T[], remote: T[], timeKey: 
         if (!current || getTime(item as Record<string, unknown>, timeKey) >= getTime(current as Record<string, unknown>, timeKey)) items.set(id, item);
     });
     return Array.from(items.values()).sort((a, b) => getTime(b as Record<string, unknown>, timeKey) - getTime(a as Record<string, unknown>, timeKey));
+}
+
+function currentSettings(): SettingsDomainData {
+    const configState = useConfigStore.getState();
+    const themeState = useThemeStore.getState();
+    return {
+        config: configState.config,
+        configUpdatedAt: configState.configUpdatedAt,
+        theme: themeState.theme,
+        themeUpdatedAt: themeState.themeUpdatedAt,
+    };
+}
+
+function mergeSettings(local: SettingsDomainData, remote: SettingsDomainData): SettingsDomainData {
+    const mergedAt = new Date().toISOString();
+    const config = pickNewestSetting(normalizeAiConfig(local.config), local.configUpdatedAt, normalizeAiConfig(remote.config), remote.configUpdatedAt, defaultConfig);
+    const theme = pickNewestSetting(local.theme, local.themeUpdatedAt, remote.theme, remote.themeUpdatedAt, "dark");
+    return {
+        config: config.value,
+        configUpdatedAt: config.updatedAt || mergedAt,
+        theme: theme.value,
+        themeUpdatedAt: theme.updatedAt || mergedAt,
+    };
+}
+
+function pickNewestSetting<T>(local: T, localUpdatedAt: string | undefined, remote: T, remoteUpdatedAt: string | undefined, defaultValue: T) {
+    const localTime = Date.parse(localUpdatedAt || "") || 0;
+    const remoteTime = Date.parse(remoteUpdatedAt || "") || 0;
+    if (localTime || remoteTime) return localTime >= remoteTime ? { value: local, updatedAt: localUpdatedAt || "" } : { value: remote, updatedAt: remoteUpdatedAt || "" };
+    const localIsDefault = JSON.stringify(local) === JSON.stringify(defaultValue);
+    const remoteIsDefault = JSON.stringify(remote) === JSON.stringify(defaultValue);
+    return localIsDefault && !remoteIsDefault ? { value: remote, updatedAt: "" } : { value: local, updatedAt: "" };
 }
 
 function collectStorageKeys(value: unknown, keys = new Set<string>()) {

@@ -1,10 +1,15 @@
 import { App, Button, Form, Input, Modal, Progress, Segmented, Select, Tabs } from "antd";
-import { Cloud, FolderOpen, Pencil, Plus, RefreshCw, Trash2, Wifi } from "lucide-react";
-import { useEffect, useState } from "react";
+import type { TFunction } from "i18next";
+import { Cloud, Download, FolderOpen, Pencil, Plus, RefreshCw, Trash2, Upload, Wifi } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
 import { ChannelEditorDrawer } from "@/components/layout/channel-editor-drawer";
 import { ConfigPromptSources } from "@/components/layout/config-prompt-sources";
+import { ConfigLocalStorage } from "@/components/layout/config-local-storage";
+import type { AppLocale } from "@/i18n";
+import { exportAppConfig, importAppConfig } from "@/services/config-file";
 import { syncAppData, type AppSyncDomainKey, type AppSyncProgressEvent } from "@/services/app-sync";
 import { getSavedLocalSyncDirectory, isLocalFolderSyncSupported, LocalFolderRemoteStorage, pickLocalSyncDirectory } from "@/services/local-folder-storage";
 import { MANIFEST_FILE_NAME } from "@/services/remote-storage";
@@ -26,11 +31,10 @@ import {
 type ModelGroup = {
     capability: ModelCapability;
     modelKey: "imageModel" | "videoModel" | "textModel" | "audioModel";
-    defaultLabel: string;
+    labelKey: string;
 };
 
 type WebdavDomainProgress = {
-    label: string;
     stage: string;
     current?: number;
     total?: number;
@@ -38,26 +42,18 @@ type WebdavDomainProgress = {
 };
 
 const modelGroups: ModelGroup[] = [
-    { capability: "image", modelKey: "imageModel", defaultLabel: "默认生图模型" },
-    { capability: "video", modelKey: "videoModel", defaultLabel: "默认视频模型" },
-    { capability: "text", modelKey: "textModel", defaultLabel: "默认文本模型" },
-    { capability: "audio", modelKey: "audioModel", defaultLabel: "默认音频模型" },
+    { capability: "image", modelKey: "imageModel", labelKey: "config.preferences.defaultImageModel" },
+    { capability: "video", modelKey: "videoModel", labelKey: "config.preferences.defaultVideoModel" },
+    { capability: "text", modelKey: "textModel", labelKey: "config.preferences.defaultTextModel" },
+    { capability: "audio", modelKey: "audioModel", labelKey: "config.preferences.defaultAudioModel" },
 ];
 
 const webdavDomainKeys: AppSyncDomainKey[] = ["settings", "canvas", "assets", "image-workbench", "video-workbench"];
-const webdavDomainLabels: Record<AppSyncDomainKey, string> = {
-    settings: "配置",
-    canvas: "画布",
-    assets: "我的资产",
-    "image-workbench": "生图工作台",
-    "video-workbench": "视频创作台",
-};
-
 function createWebdavDomainProgress(): Record<AppSyncDomainKey, WebdavDomainProgress> {
     return webdavDomainKeys.reduce(
         (progress, key) => ({
             ...progress,
-            [key]: { label: webdavDomainLabels[key], stage: "等待同步" },
+            [key]: { stage: "等待同步" },
         }),
         {} as Record<AppSyncDomainKey, WebdavDomainProgress>,
     );
@@ -65,6 +61,8 @@ function createWebdavDomainProgress(): Record<AppSyncDomainKey, WebdavDomainProg
 
 export function AppConfigPanel({ showDoneButton = false, initialTab = "channels" }: { showDoneButton?: boolean; initialTab?: ConfigTabKey }) {
     const { message } = App.useApp();
+    const { i18n, t } = useTranslation();
+    const configInputRef = useRef<HTMLInputElement>(null);
     const [activeTab, setActiveTab] = useState<ConfigTabKey>(initialTab);
     const [editingChannelId, setEditingChannelId] = useState("");
     const [testingWebdav, setTestingWebdav] = useState(false);
@@ -83,6 +81,7 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
     const webdavReady = Boolean(webdav.url.trim());
     const syncReady = webdav.syncMode === "webdav" ? webdavReady : webdav.syncMode === "local-folder" ? Boolean(webdav.localFolderName) : false;
     const editingChannel = config.channels.find((channel) => channel.id === editingChannelId) || null;
+    const locale = i18n.resolvedLanguage as AppLocale;
     useEffect(() => setActiveTab(initialTab), [initialTab]);
 
     const saveConfig = (nextConfig: AiConfig) => {
@@ -93,21 +92,32 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
         const ready = config.channels.some((channel) => channel.baseUrl.trim() && channel.apiKey.trim() && channel.models.length);
         setConfigDialogOpen(false);
         if (!ready) return;
-        message.success(shouldPromptContinue ? "配置已保存，请继续刚才的请求" : "配置已保存");
+        message.success(t(shouldPromptContinue ? "config.savedContinue" : "config.saved"));
         clearPromptContinue();
+    };
+
+    const loadConfigFile = async (file: File) => {
+        try {
+            await importAppConfig(file);
+            message.success(t("config.imported"));
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : t("config.importFailed"));
+        } finally {
+            if (configInputRef.current) configInputRef.current.value = "";
+        }
     };
 
     const updateChannels = (channels: ModelChannel[]) => saveConfig(withChannels(config, channels));
 
     const addChannel = () => {
-        const channel = createModelChannel({ name: `渠道 ${config.channels.length + 1}` });
+        const channel = createModelChannel({ name: t("config.channels.numberedName", { count: config.channels.length + 1 }) });
         updateChannels([...config.channels, channel]);
         setEditingChannelId(channel.id);
     };
 
     const deleteChannel = (id: string) => {
         if (config.channels.length <= 1) {
-            message.warning("至少保留一个渠道");
+            message.warning(t("config.channels.keepOne"));
             return;
         }
         updateChannels(config.channels.filter((channel) => channel.id !== id));
@@ -120,7 +130,7 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
     const getRemoteStorage = async () => {
         if (webdav.syncMode === "webdav") return new WebDAVRemoteStorage(webdav);
         const handle = await getSavedLocalSyncDirectory();
-        if (!handle) throw new Error("请先选择同步文件夹");
+        if (!handle) throw new Error(t("config.webdav.missingFolder"));
         return new LocalFolderRemoteStorage(handle);
     };
 
@@ -129,27 +139,31 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
             const handle = await pickLocalSyncDirectory();
             updateWebdavConfig("localFolderName", handle.name);
             updateWebdavConfig("syncMode", "local-folder");
-            message.success("同步文件夹已选择");
+            message.success(t("config.webdav.folderSelected"));
         } catch (error) {
-            message.error(error instanceof Error ? error.message : "选择同步文件夹失败");
+            message.error(error instanceof Error ? error.message : t("config.webdav.folderSelectFailed"));
         }
     };
 
     const testSyncConnection = async () => {
         if (webdav.syncMode === "off") {
-            message.warning("同步已关闭");
+            message.warning(t("config.webdav.syncDisabled"));
             return;
         }
         if (webdav.syncMode === "webdav" && !webdavReady) {
-            message.error("请先填写 WebDAV 地址");
+            message.error(t("config.webdav.missingUrl"));
+            return;
+        }
+        if (webdav.syncMode === "local-folder" && !webdav.localFolderName) {
+            message.error(t("config.webdav.missingFolder"));
             return;
         }
         setTestingWebdav(true);
         try {
             await (await getRemoteStorage()).testConnection();
-            message.success("同步连接可用");
+            message.success(webdav.syncMode === "webdav" ? t("config.webdav.available") : t("config.webdav.connectionAvailable"));
         } catch (error) {
-            message.error(error instanceof Error ? error.message : "同步连接测试失败");
+            message.error(error instanceof Error ? error.message : webdav.syncMode === "webdav" ? t("config.webdav.testFailed") : t("config.webdav.connectionTestFailed"));
         } finally {
             setTestingWebdav(false);
         }
@@ -161,7 +175,6 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
         setWebdavDomainProgress((current) => ({
             ...current,
             [event.domain as AppSyncDomainKey]: {
-                label: event.label || webdavDomainLabels[event.domain as AppSyncDomainKey],
                 stage: event.stage,
                 current: event.current,
                 total: event.total,
@@ -172,23 +185,27 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
 
     const syncWebdav = async () => {
         if (webdav.syncMode === "off") {
-            message.warning("同步已关闭");
+            message.warning(t("config.webdav.syncDisabled"));
             return;
         }
         if (webdav.syncMode === "webdav" && !webdavReady) {
-            message.error("请先填写 WebDAV 地址");
+            message.error(t("config.webdav.missingUrl"));
+            return;
+        }
+        if (webdav.syncMode === "local-folder" && !webdav.localFolderName) {
+            message.error(t("config.webdav.missingFolder"));
             return;
         }
         setSyncingWebdav(true);
         setWebdavDomainProgress(createWebdavDomainProgress());
-        setWebdavSyncStatus("准备同步");
+        setWebdavSyncStatus(t("config.webdav.preparing"));
         try {
             const result = await syncAppData(await getRemoteStorage(), updateWebdavProgress);
             updateWebdavConfig("lastSyncedAt", result.syncedAt);
-            message.success(`同步完成：配置、${result.projects} 个画布，${result.assets} 个素材，${result.imageLogs + result.videoLogs} 条记录，本次上传 ${result.uploadedFiles} 个文件 ${formatBytes(result.uploadedBytes)}`);
+            message.success(t("config.webdav.completed", { projects: result.projects, assets: result.assets, records: result.imageLogs + result.videoLogs, files: result.uploadedFiles, bytes: formatBytes(result.uploadedBytes) }));
         } catch (error) {
-            setWebdavSyncStatus(error instanceof Error ? error.message : "同步失败");
-            message.error(error instanceof Error ? error.message : "同步失败");
+            setWebdavSyncStatus(error instanceof Error ? error.message : t("config.webdav.failed"));
+            message.error(error instanceof Error ? error.message : t("config.webdav.failed"));
         } finally {
             setSyncingWebdav(false);
         }
@@ -196,33 +213,45 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
 
     return (
         <>
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-stone-200 pb-3 dark:border-stone-800">
+                <div className="text-xs text-stone-500">{t("config.fileSecurity")}</div>
+                <div className="flex gap-2">
+                    <Button icon={<Upload className="size-4" />} onClick={() => configInputRef.current?.click()}>
+                        {t("config.import")}
+                    </Button>
+                    <Button icon={<Download className="size-4" />} onClick={exportAppConfig}>
+                        {t("config.export")}
+                    </Button>
+                    <input ref={configInputRef} type="file" accept="application/json,.json" className="hidden" onChange={(event) => event.target.files?.[0] && void loadConfigFile(event.target.files[0])} />
+                </div>
+            </div>
             <Tabs
                 activeKey={activeTab}
                 onChange={(key) => setActiveTab(key as ConfigTabKey)}
                 items={[
                     {
                         key: "channels",
-                        label: "渠道",
+                        label: t("config.tabs.channels"),
                         children: (
                             <div>
                                 <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-                                    <div className="text-xs text-stone-500">每个渠道选择一个协议并拉取模型，为每个模型指定能力（生图/视频/文本/音频），并可自定义调用脚本。</div>
+                                    <div className="text-xs text-stone-500">{t("config.channels.description")}</div>
                                     <Button type="primary" icon={<Plus className="size-4" />} onClick={addChannel}>
-                                        新增渠道
+                                        {t("config.channels.add")}
                                     </Button>
                                 </div>
                                 <div className="space-y-2">
                                     {config.channels.map((channel) => (
                                         <div key={channel.id} className="flex items-center justify-between gap-3 rounded-lg border border-stone-200 px-4 py-3 dark:border-stone-800">
                                             <div className="min-w-0">
-                                                <div className="truncate text-sm font-semibold">{channel.name || "未命名渠道"}</div>
+                                                <div className="truncate text-sm font-semibold">{channel.name || t("config.channels.unnamed")}</div>
                                                 <div className="mt-1 truncate text-xs text-stone-500">
-                                                    {apiFormatLabel(channel.apiFormat)} · {channel.models.length} 个模型 · {channel.baseUrl || "未填写接口地址"}
+                                                    {apiFormatLabel(channel.apiFormat)} · {t("config.channels.modelCount", { count: channel.models.length })} · {channel.baseUrl || t("config.channels.missingUrl")}
                                                 </div>
                                             </div>
                                             <div className="flex shrink-0 gap-2">
                                                 <Button size="small" icon={<Pencil className="size-3.5" />} onClick={() => setEditingChannelId(channel.id)}>
-                                                    编辑
+                                                    {t("common.edit")}
                                                 </Button>
                                                 <Button size="small" danger icon={<Trash2 className="size-3.5" />} onClick={() => deleteChannel(channel.id)} />
                                             </div>
@@ -234,20 +263,20 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                     },
                     {
                         key: "preferences",
-                        label: "偏好设置",
+                        label: t("config.tabs.preferences"),
                         children: (
                             <Form layout="vertical" requiredMark={false}>
-                                <div className="mb-2 text-sm font-semibold">默认模型</div>
+                                <div className="mb-2 text-sm font-semibold">{t("config.preferences.defaultModels")}</div>
                                 <div className="mb-4 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
                                     {modelGroups.map((group) => (
-                                        <Form.Item key={group.modelKey} label={group.defaultLabel} className="mb-0">
+                                        <Form.Item key={group.modelKey} label={t(group.labelKey)} className="mb-0">
                                             <ModelPicker config={config} value={config[group.modelKey]} onChange={(model) => updateConfig(group.modelKey, model)} capability={group.capability} fullWidth />
                                         </Form.Item>
                                     ))}
                                 </div>
-                                <div className="mb-2 text-sm font-semibold">生成偏好</div>
+                                <div className="mb-2 text-sm font-semibold">{t("config.preferences.generation")}</div>
                                 <div className="grid gap-4 md:grid-cols-4">
-                                    <Form.Item label="画布默认生图张数" extra="新建画布生图和配置节点默认使用，单个节点仍可单独覆盖。" className="mb-4">
+                                    <Form.Item label={t("config.preferences.canvasImageCount")} extra={t("config.preferences.canvasImageCountDescription")} className="mb-4">
                                         <Input
                                             type="number"
                                             min={1}
@@ -257,13 +286,13 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                             onBlur={(event) => updateConfig("canvasImageCount", normalizeImageCount(event.target.value))}
                                         />
                                     </Form.Item>
-                                    <Form.Item label="默认音频声音" className="mb-4">
+                                    <Form.Item label={t("config.preferences.audioVoice")} className="mb-4">
                                         <Select value={config.audioVoice} options={audioVoiceOptions} onChange={(value) => updateConfig("audioVoice", value)} />
                                     </Form.Item>
-                                    <Form.Item label="默认音频格式" className="mb-4">
+                                    <Form.Item label={t("config.preferences.audioFormat")} className="mb-4">
                                         <Select value={config.audioFormat} options={audioFormatOptions} onChange={(value) => updateConfig("audioFormat", value)} />
                                     </Form.Item>
-                                    <Form.Item label="默认音频语速" className="mb-4">
+                                    <Form.Item label={t("config.preferences.audioSpeed")} className="mb-4">
                                         <Input
                                             type="number"
                                             min={0.25}
@@ -275,23 +304,23 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                         />
                                     </Form.Item>
                                 </div>
-                                <Form.Item label="默认音频指令" className="mb-4">
-                                    <Input.TextArea rows={2} value={config.audioInstructions} placeholder="例如：自然、温暖、适合旁白。" onChange={(event) => updateConfig("audioInstructions", event.target.value)} />
+                                <Form.Item label={t("config.preferences.audioInstructions")} className="mb-4">
+                                    <Input.TextArea rows={2} value={config.audioInstructions} placeholder={t("config.preferences.audioInstructionsPlaceholder")} onChange={(event) => updateConfig("audioInstructions", event.target.value)} />
                                 </Form.Item>
-                                <Form.Item label="系统提示词" className="mb-0">
-                                    <Input.TextArea rows={4} value={config.systemPrompt} placeholder="例如：你是一位擅长电影感写实摄影的视觉导演。" onChange={(event) => updateConfig("systemPrompt", event.target.value)} />
+                                <Form.Item label={t("config.preferences.systemPrompt")} className="mb-0">
+                                    <Input.TextArea rows={4} value={config.systemPrompt} placeholder={t("config.preferences.systemPromptPlaceholder")} onChange={(event) => updateConfig("systemPrompt", event.target.value)} />
                                 </Form.Item>
                             </Form>
                         ),
                     },
                     {
                         key: "prompt-sources",
-                        label: "提示词来源",
+                        label: t("config.tabs.promptSources"),
                         children: <ConfigPromptSources />,
                     },
                     {
                         key: "webdav",
-                        label: "同步",
+                        label: t("config.webdav.title"),
                         children: (
                             <Form layout="vertical" requiredMark={false}>
                                 <section className="rounded-lg border border-stone-200 p-3 dark:border-stone-800">
@@ -299,70 +328,75 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                         <div>
                                             <div className="flex items-center gap-2 text-sm font-semibold">
                                                 <Cloud className="size-4" />
-                                                数据同步
+                                                {t("config.webdav.title")}
                                             </div>
-                                            <div className="mt-1 text-xs text-stone-500">同步配置、亮暗主题、画布、我的素材、生成记录和本地媒体文件；可选择关闭、WebDAV 或本地文件夹。</div>
+                                            <div className="mt-1 text-xs text-stone-500">{t("config.webdav.description")}</div>
                                         </div>
-                                        <div className="text-xs text-stone-500">{webdav.lastSyncedAt ? `上次同步 ${formatWebdavTime(webdav.lastSyncedAt)}` : "尚未同步"}</div>
+                                        <div className="text-xs text-stone-500">{webdav.lastSyncedAt ? t("config.webdav.lastSynced", { time: formatWebdavTime(webdav.lastSyncedAt, locale) }) : t("config.webdav.neverSynced")}</div>
                                     </div>
-                                    <Form.Item label="同步方式" className="mb-4">
+                                    <Form.Item label={t("config.webdav.syncMode")} className="mb-4">
                                         <Segmented
                                             block
                                             value={webdav.syncMode}
                                             onChange={(value) => updateWebdavConfig("syncMode", value as typeof webdav.syncMode)}
                                             options={[
-                                                { label: "关闭", value: "off" },
+                                                { label: t("config.webdav.off"), value: "off" },
                                                 { label: "WebDAV", value: "webdav" },
-                                                { label: "本地文件夹", value: "local-folder", disabled: !localFolderSupported },
+                                                { label: t("config.webdav.localFolder"), value: "local-folder", disabled: !localFolderSupported },
                                             ]}
                                         />
-                                        {!localFolderSupported ? <div className="mt-2 text-xs text-stone-500">当前浏览器不支持本地文件夹同步，请使用 Chrome / Edge 桌面版</div> : null}
+                                        {!localFolderSupported ? <div className="mt-2 text-xs text-stone-500">{t("config.webdav.localFolderUnsupported")}</div> : null}
                                     </Form.Item>
                                     {webdav.syncMode === "webdav" ? (
                                         <div className="grid gap-4 md:grid-cols-2">
-                                            <Form.Item label="WebDAV 地址" className="mb-4">
+                                            <Form.Item label={t("config.webdav.url")} className="mb-4">
                                                 <Input value={webdav.url} placeholder="https://nas.example.com/webdav" onChange={(event) => updateWebdavConfig("url", event.target.value)} />
                                             </Form.Item>
-                                            <Form.Item label="远程目录" extra={`会在该目录下分业务目录保存，每个目录包含 ${MANIFEST_FILE_NAME} 和 files/`} className="mb-4">
+                                            <Form.Item label={t("config.webdav.directory")} extra={t("config.webdav.directoryDescription", { manifest: MANIFEST_FILE_NAME })} className="mb-4">
                                                 <Input value={webdav.directory} placeholder="infinite-canvas" onChange={(event) => updateWebdavConfig("directory", event.target.value)} />
                                             </Form.Item>
-                                            <Form.Item label="用户名" className="mb-0">
+                                            <Form.Item label={t("config.webdav.username")} className="mb-0">
                                                 <Input value={webdav.username} autoComplete="username" onChange={(event) => updateWebdavConfig("username", event.target.value)} />
                                             </Form.Item>
-                                            <Form.Item label="密码 / 应用密码" className="mb-0">
+                                            <Form.Item label={t("config.webdav.password")} className="mb-0">
                                                 <Input.Password value={webdav.password} autoComplete="current-password" onChange={(event) => updateWebdavConfig("password", event.target.value)} />
                                             </Form.Item>
                                         </div>
                                     ) : null}
                                     {webdav.syncMode === "local-folder" ? (
                                         <div className="rounded-lg border border-stone-200 p-3 text-sm dark:border-stone-800">
-                                            <div className="mb-3 text-xs text-stone-500">请选择本地文件夹或已挂载的 NAS 共享目录。浏览器可能会在权限过期后要求重新授权。</div>
+                                            <div className="mb-3 text-xs text-stone-500">{t("config.webdav.localFolderDescription")}</div>
                                             <Button icon={<FolderOpen className="size-4" />} disabled={!localFolderSupported} onClick={() => void chooseLocalFolder()}>
-                                                选择同步文件夹
+                                                {t("config.webdav.chooseFolder")}
                                             </Button>
-                                            <span className="ml-3 text-xs text-stone-500">{webdav.localFolderName ? `当前：${webdav.localFolderName}` : "尚未选择"}</span>
+                                            <span className="ml-3 text-xs text-stone-500">{webdav.localFolderName ? t("config.webdav.currentFolder", { name: webdav.localFolderName }) : t("config.webdav.noFolder")}</span>
                                         </div>
                                     ) : null}
                                     <div className="mt-4 flex flex-wrap items-center gap-2">
                                         <Button icon={<Wifi className="size-4" />} disabled={!syncReady || syncingWebdav} loading={testingWebdav} onClick={() => void testSyncConnection()}>
-                                            测试连接
+                                            {t("config.webdav.test")}
                                         </Button>
                                         <Button type="primary" icon={<RefreshCw className="size-4" />} disabled={!syncReady || testingWebdav} loading={syncingWebdav} onClick={() => void syncWebdav()}>
-                                            {syncingWebdav ? "同步中" : "立即同步"}
+                                            {t(syncingWebdav ? "config.webdav.syncing" : "config.webdav.syncNow")}
                                         </Button>
-                                        {webdavSyncStatus ? <span className="text-xs text-stone-500">{webdavSyncStatus}</span> : null}
+                                        {webdavSyncStatus ? <span className="text-xs text-stone-500">{syncStageLabel(webdavSyncStatus, t)}</span> : null}
                                     </div>
-                                    {syncingWebdav || webdavSyncStatus ? <WebdavProgressGrid progress={webdavDomainProgress} /> : null}
+                                    {syncingWebdav || webdavSyncStatus ? <WebdavProgressGrid progress={webdavDomainProgress} t={t} /> : null}
                                 </section>
                             </Form>
                         ),
+                    },
+                    {
+                        key: "local-storage",
+                        label: t("config.tabs.localStorage"),
+                        children: <ConfigLocalStorage active={activeTab === "local-storage"} />,
                     },
                 ]}
             />
             {showDoneButton ? (
                 <div className="mt-4 flex justify-end">
                     <Button type="primary" onClick={finishConfig}>
-                        完成
+                        {t("common.done")}
                     </Button>
                 </div>
             ) : null}
@@ -372,6 +406,7 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
 }
 
 export function AppConfigModal() {
+    const { t } = useTranslation();
     const isConfigOpen = useConfigStore((state) => state.isConfigOpen);
     const configTab = useConfigStore((state) => state.configTab);
     const setConfigDialogOpen = useConfigStore((state) => state.setConfigDialogOpen);
@@ -379,8 +414,8 @@ export function AppConfigModal() {
         <Modal
             title={
                 <div>
-                    <div className="text-lg font-semibold">配置与用户偏好</div>
-                    <div className="mt-1 text-xs font-normal text-stone-500">渠道聚合、默认模型和同步偏好</div>
+                    <div className="text-lg font-semibold">{t("config.title")}</div>
+                    <div className="mt-1 text-xs font-normal text-stone-500">{t("config.modalDescription")}</div>
                 </div>
             }
             open={isConfigOpen}
@@ -424,14 +459,15 @@ function normalizeImageCount(value: string) {
 }
 
 function apiFormatLabel(apiFormat: ApiCallFormat) {
-    return apiFormat === "gemini" ? "Gemini" : "OpenAI";
+    if (apiFormat === "gemini") return "Gemini";
+    return "OpenAI";
 }
 
-function formatWebdavTime(value: string) {
-    return new Date(value).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+function formatWebdavTime(value: string, locale: AppLocale) {
+    return new Date(value).toLocaleString(locale, { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
 
-function WebdavProgressGrid({ progress }: { progress: Record<AppSyncDomainKey, WebdavDomainProgress> }) {
+function WebdavProgressGrid({ progress, t }: { progress: Record<AppSyncDomainKey, WebdavDomainProgress>; t: TFunction }) {
     return (
         <div className="mt-3 grid gap-2">
             {webdavDomainKeys.map((key) => {
@@ -440,9 +476,9 @@ function WebdavProgressGrid({ progress }: { progress: Record<AppSyncDomainKey, W
                 return (
                     <div key={key} className="rounded-md border border-stone-200 px-3 py-2 dark:border-stone-800">
                         <div className="mb-1 flex min-w-0 items-center justify-between gap-3 text-xs">
-                            <span className="shrink-0 font-medium text-stone-700 dark:text-stone-200">{item.label}</span>
+                            <span className="shrink-0 font-medium text-stone-700 dark:text-stone-200">{t(`config.webdav.domains.${domainTranslationKey(key)}`)}</span>
                             <span className="min-w-0 truncate text-right text-stone-500">
-                                {item.stage}
+                                {syncStageLabel(item.stage, t)}
                                 {count ? ` · ${count}` : ""}
                             </span>
                         </div>
@@ -452,6 +488,32 @@ function WebdavProgressGrid({ progress }: { progress: Record<AppSyncDomainKey, W
             })}
         </div>
     );
+}
+
+function domainTranslationKey(domain: AppSyncDomainKey) {
+    if (domain === "image-workbench") return "imageWorkbench";
+    if (domain === "video-workbench") return "videoWorkbench";
+    return domain;
+}
+
+function syncStageLabel(stage: string, t: TFunction) {
+    if (stage === "等待本地数据加载") return t("config.webdav.stages.localWaiting");
+    if (stage === "同步完成") return t("config.webdav.stages.syncComplete");
+    if (stage === "等待同步") return t("config.webdav.stages.waiting");
+    if (stage === "读取远端清单") return t("config.webdav.stages.remoteManifest");
+    if (stage === "读取本地数据") return t("config.webdav.stages.localData");
+    if (stage === "下载缺失媒体") return t("config.webdav.stages.downloadMedia");
+    if (stage === "写入本地合并结果") return t("config.webdav.stages.writeMerge");
+    if (stage === "上传新增媒体") return t("config.webdav.stages.uploadMedia");
+    if (stage === "媒体已齐全") return t("config.webdav.stages.mediaReady");
+    if (stage === "媒体无需上传") return t("config.webdav.stages.mediaSkipped");
+    if (stage === "检查缺失媒体") return t("config.webdav.stages.checkMissingMedia");
+    if (stage === "下载媒体") return t("config.webdav.stages.downloadMediaFile");
+    if (stage === "检查本地媒体") return t("config.webdav.stages.checkLocalMedia");
+    if (stage.startsWith("上传媒体 ")) return t("config.webdav.stages.uploadMediaFile", { size: stage.slice(5) });
+    if (stage === "完成") return t("config.webdav.stages.complete");
+    if (stage.startsWith("上传清单 ")) return t("config.webdav.stages.uploadManifest", { size: stage.slice(5) });
+    return stage;
 }
 
 function getWebdavProgressPercent(item: WebdavDomainProgress) {
